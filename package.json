@@ -1,0 +1,20 @@
+{
+  "name": "tx_builder",
+  "module": "index.ts",
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@emurgo/cardano-serialization-lib-nodejs": "^13.2.0",
+    "@types/b4a": "^1.6.4",
+    "@types/node": "^22.9.0",
+    "axios": "^1.7.7",
+    "b4a": "^1.6.7",
+    "bip39": "^3.1.0",
+    "cbor": "^10.0.3"
+  }
+}
