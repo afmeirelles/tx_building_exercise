@@ -24,12 +24,10 @@ import {
   MetadataJsonSchema,
   AuxiliaryData,
   GeneralTransactionMetadata,
-  hash_auxiliary_data,
 } from '@emurgo/cardano-serialization-lib-nodejs'
 import { mnemonicToEntropy, validateMnemonic } from 'bip39'
 import axios, { AxiosError } from 'axios'
 import b4a from 'b4a'
-
 
 const aliceOutputAddress = 'addr_test1qrxdmktv4l9gz3pt2hjgmsgg0z5wqylnz7qz8qrs94k6jg84370tdfqyxp4qppclmqf3sqkwk45z4tqx7xh7nrmcvcxqv9e2hf'
 const bobOutputAddress = 'addr_test1qqgsysyltetnahpe4ynpxhldr2fvcv0n8gdee9kag2va6cl4370tdfqyxp4qppclmqf3sqkwk45z4tqx7xh7nrmcvcxqgwyx3c'
@@ -79,7 +77,7 @@ const postTransaction = async (encodedTx: Uint8Array) => {
     )
     return { status, data }
   } catch (error) {
-    console.error((error as AxiosError).response?.data.error.response.contents)
+    console.error((error as any).response?.data.error?.response.contents)
     throw new Error('Failed to send tx')
   }
 }
@@ -119,12 +117,12 @@ const derivePrivateKey = async () => {
   console.assert(baseAddr.to_address().to_bech32() === mainAddress, 'Incorrect payment address')
 
   return {
-    address: paymentPubKey.to_raw_key().hash(),
+    keyHash: paymentPubKey.to_raw_key().hash(),
     paymentKey: accountKey.derive(0).derive(0),
   }
 }
 
-const buildTx = async ({ address, paymentKey }: { address: Ed25519KeyHash, paymentKey: Bip32PrivateKey }) => {
+const buildTx = async ({ keyHash, paymentKey }: { keyHash: Ed25519KeyHash, paymentKey: Bip32PrivateKey }) => {
   // @todo check fee calculation and incentives (burning?)
   const linearFee = LinearFee.new(
     BigNum.from_str('44'),
@@ -153,7 +151,7 @@ const buildTx = async ({ address, paymentKey }: { address: Ed25519KeyHash, payme
   const outputAmount2 = BigNum.from_str('8000000')
 
   txBuilder.add_key_input(
-    address,
+    keyHash,
     TransactionInput.new(
       TransactionHash.from_hex(tx_hash),
       tx_index
@@ -174,30 +172,30 @@ const buildTx = async ({ address, paymentKey }: { address: Ed25519KeyHash, payme
     )
   )
 
+  const metadata = encode_json_str_to_metadatum(
+    JSON.stringify([{
+      who: 'you',
+      gonna: 'call?'
+    }]),
+    MetadataJsonSchema.NoConversions
+  )
+
+  const generalMetadata = GeneralTransactionMetadata.new()
+  generalMetadata.insert(
+    BigNum.from_str('1'),
+    metadata
+  )
+
+  const auxiliaryData = AuxiliaryData.new()
+
+  txBuilder.set_metadata(generalMetadata)
+
+  txBuilder.set_auxiliary_data(auxiliaryData)
+
   txBuilder.add_change_if_needed(Address.from_bech32(mainAddress))
-
-  // const metadata = encode_json_str_to_metadatum(
-  //   JSON.stringify({
-  //     who: 'you',
-  //     gonna: 'call?'
-  //   }),
-  //   MetadataJsonSchema.NoConversions
-  // )
-
-  // const generalMetadata = GeneralTransactionMetadata.new()
-  // generalMetadata.insert(
-  //   BigNum.from_str('1'),
-  //   metadata
-  // )
-
-  // const auxiliaryData = AuxiliaryData.new()
-
-  // console.log('Calculated Fee:', txBuilder.min_fee().to_str());
-  // console.log('Fee Set in Builder:', txBuilder.get_fee_if_set()?.to_str());
 
   // Build the transaction body
   const txBody = txBuilder.build();
-  console.log('Transaction Fee in Built Body:', txBody.fee().to_str());
 
   const txHash = FixedTransaction
     .new_from_body_bytes(txBody.to_bytes())
@@ -215,7 +213,7 @@ const buildTx = async ({ address, paymentKey }: { address: Ed25519KeyHash, payme
   const transaction = Transaction.new(
     txBody,
     witnesses,
-    // auxiliaryData
+    auxiliaryData
   );
 
   return transaction.to_bytes()
