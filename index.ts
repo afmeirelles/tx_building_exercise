@@ -30,6 +30,13 @@ import {
   ScriptAll,
   Bip32PublicKey,
   ScriptHash,
+  AssetName,
+  MultiAsset,
+  Assets,
+  Int,
+  MintBuilder,
+  MintWitness,
+  NativeScriptSource,
 } from '@emurgo/cardano-serialization-lib-nodejs'
 import { mnemonicToEntropy, validateMnemonic } from 'bip39'
 import axios, { AxiosError } from 'axios'
@@ -79,6 +86,7 @@ const postTransaction = async (transaction: Transaction) => {
         }
       }
     )
+    console.info('Transaction sent')
     return { status, data }
   } catch (error) {
     console.error((error as any).response?.data.error?.response.contents)
@@ -204,11 +212,13 @@ const maybeDepositToMultisig = async (multisig: EnterpriseAddress) => {
 
 }
 
+type OutputData = { address: string, amount: string, mint?: { multiAsset: MultiAsset, policyId: ScriptHash } }
+
 const buildTx = async (
-  { originAddress, pubKeyOrScript, signers, outputData, metadata }:
-    { originAddress: string, pubKeyOrScript: Bip32PublicKey | NativeScript, signers: Bip32PrivateKey[], outputData: { address: string, amount: string }[], metadata?: Record<string, any> }
+  { originAddress, pubKeyOrScript, signers, outputData, metadata, printerIsOn }:
+    { originAddress: string, pubKeyOrScript: Bip32PublicKey | NativeScript, signers: Bip32PrivateKey[], outputData: OutputData[], metadata?: Record<string, any>, printerIsOn?: boolean }
 ) => {
-  console.log(`Building transaction for ${originAddress}`)
+  console.log(`Transaction origin address ${originAddress}`)
 
   const linearFee = LinearFee.new(
     BigNum.from_str('44'),
@@ -222,45 +232,78 @@ const buildTx = async (
     .key_deposit(BigNum.from_str('2000000'))
     .max_value_size(4000)
     .max_tx_size(16384)
-    .coins_per_utxo_byte(BigNum.from_str('44'))
+    .coins_per_utxo_byte(BigNum.from_str('500'))
     .build()
 
   const utxos = await getUTxOs(originAddress) as { tx_hash: string, tx_index: number, amount: string }[]
 
   if (utxos.length === 0) throw new Error(`No UTxOs found for address ${originAddress}`)
 
+  console.log("utxos:", utxos);
   console.info(`Address ${originAddress} utxo amount: ${utxos[0].amount}`)
 
-  const { tx_hash, tx_index, amount } = utxos[0]
-
   const txBuilder = TransactionBuilder.new(txBuilderConfig)
-  const inputAmount = BigNum.from_str(amount)
 
-  if (pubKeyOrScript instanceof Bip32PublicKey) {
-    txBuilder.add_key_input(
-      pubKeyOrScript.to_raw_key().hash(),
-      TransactionInput.new(
-        TransactionHash.from_hex(tx_hash),
-        tx_index
-      ),
-      Value.new(inputAmount)
-    )
-  } else {
-    txBuilder.add_native_script_input(
-      pubKeyOrScript,
-      TransactionInput.new(
-        TransactionHash.from_hex(tx_hash),
-        tx_index
-      ),
-      Value.new(inputAmount)
-    )
+  utxos.forEach(({ tx_hash, tx_index, amount }) => {
+    if (pubKeyOrScript instanceof Bip32PublicKey) {
+      txBuilder.add_key_input(
+        pubKeyOrScript.to_raw_key().hash(),
+        TransactionInput.new(
+          TransactionHash.from_hex(tx_hash),
+          tx_index
+        ),
+        Value.new(BigNum.from_str(amount))
+      )
+    } else {
+      const value = Value.new(BigNum.from_str(amount))
+
+      if (outputData[0].mint && !printerIsOn) value.set_multiasset(outputData[0].mint?.multiAsset)
+
+      txBuilder.add_native_script_input(
+        pubKeyOrScript,
+        TransactionInput.new(
+          TransactionHash.from_hex(tx_hash),
+          tx_index
+        ),
+        value
+      )
+    }
+  })
+
+
+  let nativeScriptsWitness
+
+  if (pubKeyOrScript instanceof NativeScript) {
+    nativeScriptsWitness = NativeScripts.new()
+    nativeScriptsWitness.add(pubKeyOrScript)
   }
 
   outputData.forEach(output => {
+    const value = Value.new(BigNum.from_str(output.amount))
+
+    if (output.mint) {
+      if (printerIsOn) {
+        const builder = MintBuilder.new()
+
+        builder.add_asset(
+          MintWitness.new_native_script(
+            NativeScriptSource.new(pubKeyOrScript as NativeScript),
+          ),
+          AssetName.new(Buffer.from('the_mojo', 'hex')),
+          Int.from_str(output.amount)
+        )
+
+        txBuilder.set_mint_builder(builder)
+      } else {
+        value.set_multiasset(output.mint.multiAsset)
+      }
+
+    }
+
     txBuilder.add_output(
       TransactionOutput.new(
         Address.from_bech32(output.address),
-        Value.new(BigNum.from_str(output.amount))
+        value
       )
     )
   });
@@ -288,11 +331,8 @@ const buildTx = async (
   const witnesses = TransactionWitnessSet.new()
   witnesses.set_vkeys(vkeyWitnesses)
 
-  if (pubKeyOrScript instanceof NativeScript) {
-    const nativeScripts = NativeScripts.new()
-    nativeScripts.add(pubKeyOrScript)
-
-    witnesses.set_native_scripts(nativeScripts)
+  if (nativeScriptsWitness) {
+    witnesses.set_native_scripts(nativeScriptsWitness)
   }
 
   const transaction = Transaction.new(
@@ -327,6 +367,17 @@ const addMetadata = (txBuilder: TransactionBuilder, metadataJSON: Record<string,
   return auxiliaryData
 }
 
+const makeAsset = (policyId: ScriptHash, name: string) => {
+  const assetName = AssetName.new(Buffer.from(name, 'hex'))
+  const multiAsset = MultiAsset.new()
+  const assets = Assets.new()
+
+  assets.insert(assetName, BigNum.from_str('999000000'))
+
+  multiAsset.insert(policyId, assets)
+
+  return multiAsset
+}
 
 const mojo = async () => {
   const admin = await derivePaymentKeys(mnemonic, 0)
@@ -342,16 +393,30 @@ const mojo = async () => {
 
   await maybeDepositToMultisig(multisig)
 
+  const policyId = multisigScript.hash()
+
+  const multiAsset = makeAsset(policyId, 'the_mojo')
+
   const transaction = await buildTx({
     originAddress: multisigAddress,
     pubKeyOrScript: multisigScript,
     signers: [admin.paymentPrivateKey, bob.paymentPrivateKey],
-    outputData: [{ address: someRandomLuckyGuy, amount: '1000000' }],
+    outputData: [
+      {
+        address: multisigAddress,
+        amount: '2000000',
+        mint: {
+          multiAsset,
+          policyId,
+        }
+      }
+    ],
+    printerIsOn: true
   })
 
   console.log(transaction.to_json())
 
-  // await postTransaction(transaction)
+  await postTransaction(transaction)
 }
 
 mojo()
